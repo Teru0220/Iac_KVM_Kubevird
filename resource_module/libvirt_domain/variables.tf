@@ -25,3 +25,8 @@ variable "volume_name" {
   description = "Name of the volume attached to the domain"
   type        = string
 }
+
+variable "cloudinit_volume_name" {
+  description = "Name of the cloud-init volume attached to the domain"
+  type        = string
+}

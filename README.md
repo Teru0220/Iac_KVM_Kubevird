@@ -20,6 +20,8 @@ infrastructure_module/
 resource_module/
   libvirt_volume/      # 1ボリュームを作成
   libvirt_domain/      # 1ドメインを作成
+  libvirt_cloudinit_disk/   # cloud-init ISOを生成
+  libvirt_cloudinit_volume/ # cloud-init ISOをvolume poolへ登録
 ```
 
 処理の流れは次のとおりです。
@@ -28,10 +30,12 @@ resource_module/
 composition
   -> infrastructure_module (node 単位)
     -> libvirt_volume
+    -> libvirt_cloudinit_disk
+    -> libvirt_cloudinit_volume
     -> libvirt_domain
 ```
 
-`for_each` は `composition` だけで使用します。下位 module は常に1つの `node` を処理し、volume の output を domain module に渡します。
+`for_each` は `composition` だけで使用します。下位 module は常に1つの `node` を処理し、OS volume と cloud-init volume の output を domain module に渡します。
 
 ## 前提条件
 
@@ -40,20 +44,51 @@ composition
 - KVM/libvirt
 - `qemu:///system` に接続できる libvirt 環境
 - `dmacvicar/libvirt` provider 0.9.9
-- OS をインストール済みの既存 qcow2 イメージ
+- Ubuntu 22.04 (Jammy) の cloud image
+- cloud-init 対応の Ubuntu cloud image
 
-この構成は、OS 未インストールの空ディスクからノードを作成するものではありません。あらかじめ OS、ブートローダー、必要な初期設定を済ませた qcow2 イメージを用意し、それを各ノードの元イメージとしてクローンする必要があります。
+## Ubuntu cloud image の準備
 
-`image_path` には、その既存 qcow2 イメージの絶対パスを指定してください。`libvirt_volume` は `backing_store` を使用してこのイメージを backing image とする qcow2 volume を作成し、各ノードのドメインへ接続します。
+Ubuntu の公式 cloud image を次のページからダウンロードします。
+
+<https://cloud-images.ubuntu.com/jammy/current/>
+
+例として、作業用ディレクトリへ Jammy の qcow2 イメージをダウンロードします。
+
+```bash
+mkdir -p ~/tmp_disk
+wget -O ~/tmp_disk/ubuntu-22.04-cloudimg-amd64.img \
+  https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
+```
+
+`composition/terraform.tfvars` の `image_path` には、ダウンロードしたイメージの絶対パスを指定します。
+
+```hcl
+image_path = "/home/your-user/tmp_disk/ubuntu-22.04-cloudimg-amd64.img"
+```
+
+Terraform はこのイメージを backing image としてノードごとの qcow2 volume を作成し、ドメインへ接続します。OS のインストールや初期設定を済ませたイメージを別途用意する必要はありません。
 
 ```text
-OS インストール済み qcow2
+Ubuntu Jammy cloud image
   |
   +-- node-01.qcow2 -> node-01
   +-- node-02.qcow2 -> node-02
 ```
 
-イメージが存在しない場合、パスや形式が実際のファイルと異なる場合、または OS がインストールされていない場合は、ノードの作成や起動に失敗します。Terraform を実行するユーザーから読み取り可能な場所にイメージを配置してください。
+イメージが存在しない場合、パスや形式が実際のファイルと異なる場合は、ノードの作成に失敗します。Terraform を実行するユーザーから読み取り可能な場所にイメージを配置してください。
+
+## cloud-init による初期設定
+
+`libvirt_cloudinit_disk` が user-data と meta-data を含む cloud-init ISO を生成し、`libvirt_cloudinit_volume` が libvirt の storage pool へ登録します。その ISO を各ドメインへ接続することで、Ubuntu の初回起動時に cloud-init が次の設定を行います。
+
+- `ubuntu` ユーザーの作成
+- SSH 公開鍵の登録
+- パスワード認証の無効化
+- root ログインの無効化
+- `hostname` と `instance_id` の設定
+
+SSH 公開鍵は `ssh_public_key_path` で指定します。既定値は `~/.ssh/id_ed25519.pub` です。公開鍵ファイルが別の場所にある場合は、`composition/terraform.tfvars` で変更してください。
 
 provider は [composition/provider.tf](composition/provider.tf) で次の URI を使用します。
 
@@ -73,8 +108,11 @@ Terraform 実行ユーザーが libvirt を操作できることを確認して�
 nodes = [
   {
     domain_name        = "node-01"
+    instance_id        = "node-01"
+    hostname           = "node-01"
+    cloudinit_name     = "node-01-seed.iso"
     volume_name        = "node-01.qcow2"
-    image_path         = "/path/to/image.qcow2"
+    image_path         = "/home/your-user/tmp_disk/jammy-server-cloudimg-amd64.img"
     volume_pool        = "default"
     volume_capacity    = 42949672960
     volume_format      = "qcow2"
@@ -105,13 +143,18 @@ nodes = [
 ]
 ```
 
+`ssh_public_key_path` には cloud-init で登録するSSH公開鍵のパスを指定します。既定値は `~/.ssh/id_ed25519.pub` です。
+
 ### 主なパラメータ
 
 | パラメータ | 説明 |
 | --- | --- |
 | `domain_name` | libvirt ドメイン名。`nodes` の `for_each` キーにも使用 |
+| `instance_id` | cloud-init のインスタンス ID |
+| `hostname` | cloud-init で設定するホスト名 |
+| `cloudinit_name` | 作成する cloud-init ディスク名 |
 | `volume_name` | 作成する libvirt volume 名 |
-| `image_path` | backing image の絶対パス |
+| `image_path` | Ubuntu cloud image の絶対パス |
 | `volume_pool` | libvirt storage pool |
 | `volume_capacity` | volume 容量（byte） |
 | `volume_format` | volume と backing image の形式 |
@@ -131,7 +174,7 @@ nodes = [
 
 ## 実行方法
 
-作業ディレクトリを `composition` にして実行します。
+Ubuntu cloud image と SSH 公開鍵を準備した後、作業ディレクトリを `composition` にして実行します。
 
 ```bash
 cd composition
@@ -147,6 +190,7 @@ terraform apply
 ```bash
 terraform output domain_names
 terraform output volume_names
+terraform output cloudinit_names
 ```
 
 削除する場合は、同じ `composition` ディレクトリで実行します。

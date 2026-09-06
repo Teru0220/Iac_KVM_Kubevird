@@ -7,3 +7,8 @@ output "domain_name" {
   description = "Name of the created libvirt domain"
   value       = module.domain.domain_name
 }
+
+output "cloudinit_name" {
+  description = "Name of the created cloud-init disk"
+  value       = module.cloudinit.cloudinit_name
+}

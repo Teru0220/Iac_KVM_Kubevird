@@ -22,6 +22,18 @@ resource "libvirt_domain" "domain" {
         }
         driver = var.node.disk_driver
         target = var.node.disk_target
+      },
+      {
+        source = {
+          volume = {
+            pool   = var.node.volume_pool
+            volume = var.cloudinit_volume_name
+          }
+        }
+        target = {
+          dev = "vdb"
+          bus = "virtio"
+        }
       }
     ]
   })

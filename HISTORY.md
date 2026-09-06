@@ -27,3 +27,18 @@
    * 個々のリソースを組み合わせ、「KVM ノード」という論理単位としてまとめるモジュール。
 3. **`resource_module/`（最下層・アトミックリソース）**
    * `libvirt_domain` や `libvirt_volume` など、単一リソースのみを管理する最小モジュール。
+
+---
+
+### 3. 2026-09-07: cloud-init と Ubuntu cloud image の導入
+* Ubuntu 22.04 (Jammy) の公式 cloud image を OS の backing image として利用する構成へ変更。
+  * `https://cloud-images.ubuntu.com/jammy/current/` から取得した qcow2 イメージを `image_path` に指定。
+  * ノードごとの qcow2 volume を作成し、libvirt domain へ接続。
+* cloud-init による初回起動時の初期設定を追加。
+  * `libvirt_cloudinit_disk` で user-data と meta-data を含む ISO を生成。
+  * `templatefile()` を使用して SSH 公開鍵を user-data へ展開。
+  * `ssh_public_key_path` で公開鍵ファイルを指定可能にした。
+* 公式 provider ドキュメントに合わせ、cloud-init ISO を storage pool の volume として登録。
+  * `libvirt_cloudinit_volume` モジュールを追加。
+  * domain から `source.volume` で cloud-init volume を接続。
+

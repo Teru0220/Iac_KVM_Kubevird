@@ -5,6 +5,9 @@ run "nodes_are_created_from_the_nodes_variable" {
     nodes = [
       {
         domain_name        = "test-node-01"
+        instance_id        = "test-node-01"
+        hostname           = "test-node-01"
+        cloudinit_name     = "test-node-01-seed.iso"
         volume_name        = "test-node-01.qcow2"
         image_path         = "/tmp/test-node-01.qcow2"
         volume_pool        = "default"
@@ -33,6 +36,9 @@ run "nodes_are_created_from_the_nodes_variable" {
       },
       {
         domain_name        = "test-node-02"
+        instance_id        = "test-node-02"
+        hostname           = "test-node-02"
+        cloudinit_name     = "test-node-02-seed.iso"
         volume_name        = "test-node-02.qcow2"
         image_path         = "/tmp/test-node-02.qcow2"
         volume_pool        = "default"
@@ -70,5 +76,10 @@ run "nodes_are_created_from_the_nodes_variable" {
   assert {
     condition     = output.volume_names == { "test-node-01" = "test-node-01.qcow2", "test-node-02" = "test-node-02.qcow2" }
     error_message = "Each node must produce a volume with its configured volume_name."
+  }
+
+  assert {
+    condition     = output.cloudinit_names == { "test-node-01" = "test-node-01-seed.iso", "test-node-02" = "test-node-02-seed.iso" }
+    error_message = "Each node must produce a cloud-init disk with its configured cloudinit_name."
   }
 }

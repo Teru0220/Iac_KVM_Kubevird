@@ -1,6 +1,11 @@
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+
 nodes = [
   {
     domain_name        = "node-01"
+    instance_id        = "node-01"
+    hostname           = "node-01"
+    cloudinit_name     = "node-01-seed.iso"
     volume_name        = "node-01.qcow2"
     image_path         = "/path/to/your/image.qcow2"
     volume_pool        = "default"

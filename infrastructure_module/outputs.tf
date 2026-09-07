@@ -12,3 +12,11 @@ output "cloudinit_name" {
   description = "Name of the created cloud-init disk"
   value       = module.cloudinit.cloudinit_name
 }
+
+output "ip_address" {
+  value = module.domain.ip_address # または libvirt_domain から参照した IP
+}
+
+output "role" {
+  value = var.node.role
+}

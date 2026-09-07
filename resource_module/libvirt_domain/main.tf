@@ -4,6 +4,7 @@ resource "libvirt_domain" "domain" {
   memory_unit = var.node.domain_memory_unit
   vcpu        = var.node.domain_vcpu
   type        = var.node.domain_type
+  running = true
 
   os = var.node.os
 
@@ -36,5 +37,34 @@ resource "libvirt_domain" "domain" {
         }
       }
     ]
+    # ネットワークインターフェースの設定
+    interfaces = [
+      {
+        model = {
+          type = "virtio"
+        }
+        source = {
+          network = {
+            network = "default"
+          }
+        }
+        # IP アドレス取得待機の設定
+        wait_for_ip = {
+          network = "0.0.0.0/0" # 任意の IPv4 アドレスが割り当てられるまで待機
+          source  = "lease"     # DHCP リースから取得（または "agent" / "any"）
+          timeout = 300         # タイムアウト時間（秒）
+        }
+      }
+    ]
   })
+}
+
+# 起動したドメインから IP アドレス情報を取得する Data Source
+data "libvirt_domain_interface_addresses" "this" {
+  domain = libvirt_domain.domain.name
+  source = "lease" # DHCP リースから取得する場合（qemu-guest-agent を使うなら "agent"）
+
+  depends_on = [
+    libvirt_domain.domain
+  ]
 }

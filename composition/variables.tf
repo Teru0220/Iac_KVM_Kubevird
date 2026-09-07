@@ -21,6 +21,7 @@ variable "nodes" {
     instance_id        = string
     hostname           = string
     cloudinit_name     = string
+    role               = string
   }))
 }
 

@@ -22,6 +22,10 @@ resource_module/
   libvirt_domain/      # 1ドメインを作成
   libvirt_cloudinit_disk/   # cloud-init ISOを生成
   libvirt_cloudinit_volume/ # cloud-init ISOをvolume poolへ登録
+
+ansible/
+  inventory.yaml       # Terraform が生成する Ansible inventory
+  inventory.yaml.tftpl # inventory のテンプレート
 ```
 
 処理の流れは次のとおりです。
@@ -111,6 +115,7 @@ nodes = [
     instance_id        = "node-01"
     hostname           = "node-01"
     cloudinit_name     = "node-01-seed.iso"
+    role               = "worker"
     volume_name        = "node-01.qcow2"
     image_path         = "/home/your-user/tmp_disk/jammy-server-cloudimg-amd64.img"
     volume_pool        = "default"
@@ -153,6 +158,7 @@ nodes = [
 | `instance_id` | cloud-init のインスタンス ID |
 | `hostname` | cloud-init で設定するホスト名 |
 | `cloudinit_name` | 作成する cloud-init ディスク名 |
+| `role` | Ansible inventory のグループ（`control` または `worker`） |
 | `volume_name` | 作成する libvirt volume 名 |
 | `image_path` | Ubuntu cloud image の絶対パス |
 | `volume_pool` | libvirt storage pool |
@@ -185,13 +191,26 @@ terraform plan
 terraform apply
 ```
 
-適用後は作成された名前を確認できます。
+`terraform apply` は各ドメインを起動し、DHCP リースから取得した IPv4 アドレスを使って `ansible/inventory.yaml` を自動生成します。inventory には `role = "control"` のノードが `control_plane`、`role = "worker"` のノードが `worker_node` として登録されます。
+
+適用後は作成された名前と生成された inventory を確認できます。
 
 ```bash
 terraform output domain_names
 terraform output volume_names
 terraform output cloudinit_names
+cat ../ansible/inventory.yaml
 ```
+
+## Ansible からの接続確認
+
+cloud-init による初回設定と SSH サービスの起動が完了した後、リポジトリのルートディレクトリから Ansible の ping module を実行します。inventory の `ansible_user` と秘密鍵のパスは `ansible/inventory.yaml` に定義されています。
+
+```bash
+ansible k8s_cluster -i ./ansible/inventory.yaml -m ping
+```
+
+接続先の IP アドレスは、libvirt の `default` ネットワークから DHCP で割り当てられます。IP アドレスを取得できない場合は、ドメインの起動状態、DHCP リース、cloud-init の完了状態を確認してから `terraform apply` を再実行してください。
 
 削除する場合は、同じ `composition` ディレクトリで実行します。
 

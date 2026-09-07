@@ -7,6 +7,14 @@
 
 ## 対応履歴・詳細
 
+### 4. 2026-09-08: Ansible inventory の自動生成と IP アドレス取得
+* Terraform で作成した各 libvirt domain を起動し、DHCP リースから割り当てられた IPv4 アドレスを取得する処理を追加。
+* ノード設定に `role` を追加し、`control` と `worker` の役割を指定可能にした。
+* Terraform の `local_file` resource で `ansible/inventory.yaml` を自動生成。
+  * `control` ノードを `control_plane`、`worker` ノードを `worker_node` に分類。
+  * 接続ユーザー、SSH 秘密鍵、Python interpreter などの Ansible 接続設定を inventory に出力。
+* `ansible k8s_cluster -i ./ansible/inventory.yaml -m ping` による作成ノードの SSH 接続確認に対応。
+
 ### 1. 初期検証と動作要件の確定
 * **`q35` マシンタイプの動作安定化**
   * `q35` マシンタイプで VM を正常起動させるため、`acpi = true` および `apic = {}` のフラグ設定が必須であることを特定・適用。

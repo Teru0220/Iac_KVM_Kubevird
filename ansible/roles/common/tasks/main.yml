@@ -1,0 +1,83 @@
+- name: Disable swap
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+  changed_when: false
+
+- name: Comment out swap entries in fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+    replace: '# \1'
+
+- name: Configure kernel modules for Kubernetes
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+    mode: '0644'
+
+- name: Load kernel modules
+  ansible.builtin.shell: |
+    modprobe overlay
+    modprobe br_netfilter
+  changed_when: false
+
+- name: Configure Kubernetes sysctl settings
+  ansible.builtin.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    reload: true
+  loop:
+    - { key: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+    - { key: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+    - { key: 'net.ipv4.ip_forward', value: '1' }
+
+# ==============================================================================
+# Cloud-init disable settings
+# ==============================================================================
+
+- name: Disable cloud-init network reconfiguration
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    content: "network: {config: disabled}\n"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Create cloud-init disable flag file
+  ansible.builtin.file:
+    path: /etc/cloud/cloud-init.disabled
+    state: touch
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Stop and disable cloud-init services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - cloud-init
+    - cloud-init-local
+    - cloud-config
+    - cloud-final
+
+- name: SSH サーバーの UseDNS を no に設定（接続遅延・ハングアップ防止）
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?UseDNS'
+    line: 'UseDNS no'
+    state: present
+  notify: Restart SSH
+
+- name: SSH サーバーの GSSAPIAuthentication を no に設定
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?GSSAPIAuthentication'
+    line: 'GSSAPIAuthentication no'
+    state: present
+  notify: Restart SSH

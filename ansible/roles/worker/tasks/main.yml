@@ -1,0 +1,4 @@
+- name: Join worker node to cluster
+  ansible.builtin.command: "{{ control_plane_join_command }}"
+  args:
+    creates: /etc/kubernetes/kubelet.conf

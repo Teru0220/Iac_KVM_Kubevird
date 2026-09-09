@@ -1,0 +1,19 @@
+- name: Common setup for all nodes
+  hosts: k8s_cluster
+  become: true
+  roles:
+    - common
+    - container_runtime
+    - k8s_packages
+
+- name: Control plane setup and initialization
+  hosts: control_plane
+  become: true
+  roles:
+    - control_plane
+
+- name: Worker node cluster join
+  hosts: worker_node
+  become: true
+  roles:
+    - worker

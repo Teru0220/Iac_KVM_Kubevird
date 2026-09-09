@@ -1,128 +1,81 @@
-# KVM ノードプロビジョニング
+# KVM ノードプロビジョニング + Kubernetes 構築基盤
 
-Terraform と `dmacvicar/libvirt` provider を使用して、ローカルの KVM/libvirt 環境へ複数の仮想ノードと qcow2 ボリュームを作成する構成です。
+このリポジトリは、Terraform と `dmacvicar/libvirt` provider を使って KVM/libvirt 上に仮想ノードを作成し、さらに Ansible で Kubernetes クラスタの初期化・ノード参加までを自動化する構成です。
 
-## 構成
-
-```text
-composition/
-  main.tf              # nodes を for_each で展開するルート構成
-  variables.tf         # nodes の型定義
-  terraform.tfvars     # 作成するノードの具体的な設定
-  provider.tf          # libvirt provider
-  tests/               # terraform test 用のテスト
-
-infrastructure_module/
-  main.tf              # 1ノード分の volume/domain module を接続
-  variables.tf
-  outputs.tf
-
-resource_module/
-  libvirt_volume/      # 1ボリュームを作成
-  libvirt_domain/      # 1ドメインを作成
-  libvirt_cloudinit_disk/   # cloud-init ISOを生成
-  libvirt_cloudinit_volume/ # cloud-init ISOをvolume poolへ登録
-
-ansible/
-  inventory.yaml       # Terraform が生成する Ansible inventory
-  inventory.yaml.tftpl # inventory のテンプレート
-```
-
-処理の流れは次のとおりです。
+## 1. 構成の概要
 
 ```text
-composition
-  -> infrastructure_module (node 単位)
-    -> libvirt_volume
-    -> libvirt_cloudinit_disk
-    -> libvirt_cloudinit_volume
-    -> libvirt_domain
+.
+├── composition/                     # Terraform のルート構成
+│   ├── main.tf                      # libvirt domain / volume を node 単位で生成
+│   ├── variables.tf                 # nodes などの定義
+│   ├── terraform.tfvars            # 実際のノード構成
+│   └── tests/                      # terraform test
+├── infrastructure_module/           # 1 node 分の論理モジュール
+├── resource_module/                 # libvirt volume / domain / cloud-init などのリソース実装
+├── ansible/
+│   ├── inventory.yml                # Terraform により生成される実行用 inventory
+│   ├── inventory.yml.tftpl          # inventory 生成テンプレート
+│   ├── site.yml                    # 全ロールを呼び出す playbook
+│   ├── group_vars/
+│   └── roles/
+├── README.md
+├── HISTORY.md
+└── terraform.tfvars.example
 ```
 
-`for_each` は `composition` だけで使用します。下位 module は常に1つの `node` を処理し、OS volume と cloud-init volume の output を domain module に渡します。
+Terraform は `composition` で Node 定義を展開して各 VM を作成し、cloud-init により `ubuntu` ユーザーと SSH 公開鍵を設定します。その後、`ansible/inventory.yml` が自動生成され、Ansible からノードへ接続して Kubernetes の準備を進めます。
 
-## 前提条件
+## 2. 主要な機能
 
-- Linux
+- KVM/libvirt 上の仮想ノード作成
+- Ubuntu 22.04 Jammy cloud image を backing image として利用
+- cloud-init による初期ユーザー作成と SSH 設定
+- `role` ごとの inventory 自動生成
+  - `control` -> `control_plane`
+  - `worker` -> `worker_node`
+- Ansible による Kubernetes 前提設定とクラスタ構築
+
+## 3. 前提条件
+
+- Linux ホスト
 - Terraform 1.6 以上
-- KVM/libvirt
-- `qemu:///system` に接続できる libvirt 環境
-- `dmacvicar/libvirt` provider 0.9.9
-- Ubuntu 22.04 (Jammy) の cloud image
-- cloud-init 対応の Ubuntu cloud image
+- KVM / libvirt
+- `qemu:///system` への接続
+- `dmacvicar/libvirt` provider
+- Ubuntu 22.04 cloud image
+- SSH 公開鍵ファイル
 
-## Ubuntu cloud image の準備
+## 4. 事前準備
 
-Ubuntu の公式 cloud image を次のページからダウンロードします。
-
-<https://cloud-images.ubuntu.com/jammy/current/>
-
-例として、作業用ディレクトリへ Jammy の qcow2 イメージをダウンロードします。
+### Ubuntu cloud image の用意
 
 ```bash
 mkdir -p ~/tmp_disk
-wget -O ~/tmp_disk/ubuntu-22.04-cloudimg-amd64.img \
+wget -O ~/tmp_disk/ubuntu-22.04-cloudimg.qcow2 \
   https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
 ```
 
-`composition/terraform.tfvars` の `image_path` には、ダウンロードしたイメージの絶対パスを指定します。
+`composition/terraform.tfvars` の `image_path` にダウンロードしたファイルの絶対パスを設定します。
 
 ```hcl
-image_path = "/home/your-user/tmp_disk/ubuntu-22.04-cloudimg-amd64.img"
-```
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+cloudinit_user = "ubuntu"
+user_password = "ubuntu"
 
-Terraform はこのイメージを backing image としてノードごとの qcow2 volume を作成し、ドメインへ接続します。OS のインストールや初期設定を済ませたイメージを別途用意する必要はありません。
-
-```text
-Ubuntu Jammy cloud image
-  |
-  +-- node-01.qcow2 -> node-01
-  +-- node-02.qcow2 -> node-02
-```
-
-イメージが存在しない場合、パスや形式が実際のファイルと異なる場合は、ノードの作成に失敗します。Terraform を実行するユーザーから読み取り可能な場所にイメージを配置してください。
-
-## cloud-init による初期設定
-
-`libvirt_cloudinit_disk` が user-data と meta-data を含む cloud-init ISO を生成し、`libvirt_cloudinit_volume` が libvirt の storage pool へ登録します。その ISO を各ドメインへ接続することで、Ubuntu の初回起動時に cloud-init が次の設定を行います。
-
-- `ubuntu` ユーザーの作成
-- SSH 公開鍵の登録
-- パスワード認証の無効化
-- root ログインの無効化
-- `hostname` と `instance_id` の設定
-
-SSH 公開鍵は `ssh_public_key_path` で指定します。既定値は `~/.ssh/id_ed25519.pub` です。公開鍵ファイルが別の場所にある場合は、`composition/terraform.tfvars` で変更してください。
-
-provider は [composition/provider.tf](composition/provider.tf) で次の URI を使用します。
-
-```hcl
-provider "libvirt" {
-  uri = "qemu:///system"
-}
-```
-
-Terraform 実行ユーザーが libvirt を操作できることを確認してください。
-
-## ノード設定
-
-具体的な設定は [composition/terraform.tfvars](composition/terraform.tfvars) の `nodes` 配列に記述します。ノードごとに全パラメータを個別指定できます。
-
-```hcl
 nodes = [
   {
-    domain_name        = "node-01"
-    instance_id        = "node-01"
-    hostname           = "node-01"
-    cloudinit_name     = "node-01-seed.iso"
-    role               = "worker"
-    volume_name        = "node-01.qcow2"
-    image_path         = "/home/your-user/tmp_disk/jammy-server-cloudimg-amd64.img"
+    domain_name        = "control-plane-01"
+    instance_id        = "control-plane-01"
+    hostname           = "control-plane-01"
+    cloudinit_name     = "control-plane-01-seed.iso"
+    volume_name        = "control-plane-01.qcow2"
+    image_path         = "/home/your-user/tmp_disk/ubuntu-22.04-cloudimg.qcow2"
     volume_pool        = "default"
     volume_capacity    = 42949672960
     volume_format      = "qcow2"
     volume_target      = { format = { type = "qcow2" } }
-    domain_memory      = 8192
+    domain_memory      = 4096
     domain_memory_unit = "MiB"
     domain_vcpu        = 2
     domain_type        = "kvm"
@@ -137,50 +90,16 @@ nodes = [
     cpu      = { mode = "host-passthrough" }
     features = { acpi = true, apic = {} }
     devices = {
-      interfaces = [{
-        model  = { type = "virtio" }
-        source = { network = { network = "default" } }
-      }]
-      consoles = [{ target = { type = "serial", port = "0" } }]
-      graphics = [{ spice = { auto_port = true, listeners = [{ address = {} }] } }]
+      interfaces = [{ model = { type = "virtio" }, source = { network = { network = "default" } } }]
+      consoles   = [{ target = { type = "serial", port = "0" } }]
+      graphics   = [{ spice = { auto_port = true, listeners = [{ address = {} }] } }]
     }
+    role = "control"
   }
 ]
 ```
 
-`ssh_public_key_path` には cloud-init で登録するSSH公開鍵のパスを指定します。既定値は `~/.ssh/id_ed25519.pub` です。
-
-### 主なパラメータ
-
-| パラメータ | 説明 |
-| --- | --- |
-| `domain_name` | libvirt ドメイン名。`nodes` の `for_each` キーにも使用 |
-| `instance_id` | cloud-init のインスタンス ID |
-| `hostname` | cloud-init で設定するホスト名 |
-| `cloudinit_name` | 作成する cloud-init ディスク名 |
-| `role` | Ansible inventory のグループ（`control` または `worker`） |
-| `volume_name` | 作成する libvirt volume 名 |
-| `image_path` | Ubuntu cloud image の絶対パス |
-| `volume_pool` | libvirt storage pool |
-| `volume_capacity` | volume 容量（byte） |
-| `volume_format` | volume と backing image の形式 |
-| `volume_target` | volume の target 設定 |
-| `domain_memory` | メモリ容量 |
-| `domain_memory_unit` | メモリ単位 |
-| `domain_vcpu` | vCPU 数 |
-| `domain_type` | libvirt の仮想化タイプ |
-| `disk_driver` | ドメインディスクの driver 設定 |
-| `disk_target` | ドメインディスクの target 設定 |
-| `os` | OS、アーキテクチャ、machine、boot 設定 |
-| `cpu` | CPU モード |
-| `features` | ACPI/APIC などの機能 |
-| `devices` | ネットワーク、コンソール、グラフィックなどのデバイス |
-
-`domain_name` は重複できません。重複すると `composition` の `for_each` キーが衝突します。
-
-## 実行方法
-
-Ubuntu cloud image と SSH 公開鍵を準備した後、作業ディレクトリを `composition` にして実行します。
+## 5. Terraform による VM 作成
 
 ```bash
 cd composition
@@ -191,32 +110,61 @@ terraform plan
 terraform apply
 ```
 
-`terraform apply` は各ドメインを起動し、DHCP リースから取得した IPv4 アドレスを使って `ansible/inventory.yaml` を自動生成します。inventory には `role = "control"` のノードが `control_plane`、`role = "worker"` のノードが `worker_node` として登録されます。
-
-適用後は作成された名前と生成された inventory を確認できます。
+`terraform apply` の途中で、各 VM の DHCP アドレスが取得され、`ansible/inventory.yml` が自動生成されます。生成された inventory はそのまま `ansible` 側の playbook 実行で利用できます。
 
 ```bash
 terraform output domain_names
 terraform output volume_names
 terraform output cloudinit_names
-cat ../ansible/inventory.yaml
+cat ../ansible/inventory.yml
 ```
 
-## Ansible からの接続確認
+## 6. Ansible による接続確認と構築
 
-cloud-init による初回設定と SSH サービスの起動が完了した後、リポジトリのルートディレクトリから Ansible の ping module を実行します。inventory の `ansible_user` と秘密鍵のパスは `ansible/inventory.yaml` に定義されています。
+以下のコマンドで接続確認を行います。
 
 ```bash
-ansible k8s_cluster -i ./ansible/inventory.yaml -m ping
+ansible k8s_cluster -i ./ansible/inventory.yml -m ping
 ```
 
-接続先の IP アドレスは、libvirt の `default` ネットワークから DHCP で割り当てられます。IP アドレスを取得できない場合は、ドメインの起動状態、DHCP リース、cloud-init の完了状態を確認してから `terraform apply` を再実行してください。
-
-削除する場合は、同じ `composition` ディレクトリで実行します。
+構築を進める場合は、playbook を実行します。
 
 ```bash
+cd ansible
+ansible-playbook -i inventory.yml site.yml
+```
+
+`site.yml` には以下のロールが定義されています。
+
+- `common`
+- `container_runtime`
+- `k8s_packages`
+- `control_plane`
+- `worker`
+
+## 7. 役割と作成ルール
+
+`composition/terraform.tfvars` に設定する `role` は次のように使われます。
+
+- `control` : control-plane ノードとして `control_plane` グループに登録
+- `worker` : worker ノードとして `worker_node` グループに登録
+
+`domain_name` は `for_each` のキーとして使われるため、重複しないようにします。
+
+## 8. 後片付け
+
+```bash
+cd composition
 terraform destroy
 ```
+
+## 9. 変更履歴
+
+最新の対応内容は [HISTORY.md](HISTORY.md) を参照してください。
+
+---
+
+本構成は、KVM の VM 作成・DHCP での IP 取得・cloud-init 設定・Ansible 構成管理までを一連の流れとして扱えるように整理しています。既存のノードに対しては `terraform apply` を繰り返し、必要に応じて inventory と playbook が更新される運用を想定しています。
 
 ## テスト
 

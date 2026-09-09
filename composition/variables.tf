@@ -30,3 +30,15 @@ variable "ssh_public_key_path" {
   type        = string
   default     = "~/.ssh/id_ed25519.pub"
 }
+
+variable "cloudinit_user" {
+  description = "User account created by cloud-init"
+  type        = string
+  default     = "ubuntu"
+}
+
+variable "user_password" {
+  description = "Optional password for the cloud-init user during setup"
+  type        = string
+  default     = ""
+}

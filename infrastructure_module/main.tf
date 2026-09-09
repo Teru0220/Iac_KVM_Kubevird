@@ -3,6 +3,8 @@ module "cloudinit" {
 
   node           = var.node
   ssh_public_key = var.ssh_public_key
+  cloudinit_user = var.cloudinit_user
+  user_password  = var.user_password
 }
 
 module "volume" {

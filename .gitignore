@@ -13,4 +13,4 @@ terraform.tfvars
 .terraform.lock.hcl
 
 # Terraform が生成する Ansible inventory
-/ansible/inventory.yaml
+/ansible/inventory.yml

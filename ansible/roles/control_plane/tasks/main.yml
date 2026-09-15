@@ -1,3 +1,43 @@
+- name: Create the SSH directory for the control plane user
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.ssh"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0700'
+
+- name: Generate an ED25519 SSH key pair on the control plane
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -t
+      - ed25519
+      - -f
+      - "/home/{{ ansible_user }}/.ssh/id_ed25519"
+      - -N
+      - ''
+      - -C
+      - "{{ ansible_user }}@{{ inventory_hostname }}"
+    creates: "/home/{{ ansible_user }}/.ssh/id_ed25519"
+
+- name: Set permissions on the control plane SSH key pair
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "/home/{{ ansible_user }}/.ssh/id_ed25519"
+      mode: '0600'
+    - path: "/home/{{ ansible_user }}/.ssh/id_ed25519.pub"
+      mode: '0644'
+
 - name: Run kubeadm init
   ansible.builtin.shell: |
     kubeadm init --pod-network-cidr={{ pod_network_cidr }} --apiserver-advertise-address={{ ansible_host }}

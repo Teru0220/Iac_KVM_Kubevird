@@ -60,3 +60,54 @@
 * `control` ノードが `control_plane` グループ、`worker` ノードが `worker_node` グループにマッピングされるよう inventory の自動生成処理を整理した。
 * README を実際の運用手順に合わせて更新し、Terraform から Ansible への接続・デプロイ手順を明確化した。
 * クラスタ接続確認 (`ansible k8s_cluster -i ./ansible/inventory.yml -m ping`) と Ansible Playbook 実行を、実運用の一連の流れとして確定した。
+
+---
+
+### 6. 2026-09-15: KubeVirt 前提条件確認と導入手順の検証
+* `doc/KubeVirtCheckList.md` のチェック項目に沿って、KubeVirt 導入前の前提条件を確認した。
+  * Kubernetes クラスターが起動し、全ノードが `Ready` であること。
+  * `kubectl cluster-info` で Kubernetes API Server に接続できること。
+  * 全ノードで `virt-host-validate qemu` を実行し、`/dev/kvm` が利用可能であること。
+  * AppArmor/SELinux による KVM やコンテナランタイムへのアクセス拒否がないこと。
+  * CNI プラグインの Pod が正常に稼働していること。
+  * Kubernetes バージョンが KubeVirt の対応範囲に含まれること。
+  * KubeVirt と VM の稼働に必要な CPU・メモリが確保されていること。
+* KubeVirt 公式サイトのインストール手順を参照し、`doc/kubevirtInstallation.md` の手順を実行した。
+  * KubeVirt Operator のリリース YAML を apply。
+  * KubeVirt カスタムリソースを apply。
+  * `kubevirt` リソースが `Available` になるまで待機。
+  * `kubevirt` namespace の Operator、`virt-api`、`virt-controller`、`virt-handler` などの Pod を確認。
+* 導入後の試行錯誤により、KubeVirt 本体だけでは VM 用のディスクを準備できず、`doc/pvcstart.md` の処理が必要であることを確認した。
+  * `ExpandDisks` feature gate の有効化。
+  * CDI Operator/CR の導入。
+  * NFS サーバーと NFS クライアントの設定。
+  * Helm による NFS external provisioner と `nfs-client` StorageClass の導入。
+  * DataVolume を作成し、外部の Ubuntu cloud image を CDI 経由で取り込む処理。
+* 上記の確認結果をもとに、KubeVirt インストール、CDI、NFS、DataVolume の処理を Ansible へ組み込む方針を確定した。
+
+---
+
+### 7. 2026-09-16: KubeVirt とストレージ処理の Ansible 統合
+* `doc/kubevirtRequirements.md` の内容を `ansible/roles/kubevirt` に統合した。
+  * `virt-host-validate qemu` による仮想化支援機能の検証。
+  * `/dev/kvm` の権限設定と `kvm` グループへの追加。
+  * AppArmor プロファイルの解除、サービス停止、無効化。
+* `doc/kubevirtInstallation.md` の内容を Ansible 化した。
+  * KubeVirt Operator と KubeVirt CR の導入。
+  * KubeVirt の `Available` 状態待機。
+* `doc/pvcstart.md` の内容を Ansible 化した。
+  * `ExpandDisks` の有効化。
+  * CDI Operator/CR の導入。
+  * NFS サーバー、worker の NFS クライアント、NFS external provisioner の構築。
+  * `nfs-client` StorageClass のデフォルト設定。
+  * `K8s_yml/ubuntu/tmp_dv.yml` の apply と DataVolume `Succeeded` 待機。
+* control plane の `ansible_user` 用 ED25519 SSH 鍵ペア生成処理を追加した。
+* ロール名を内容に合わせて `storage` から `kubevirt` へ変更した。
+* README と作業履歴の構成を現行の Terraform/Ansible/KubeVirt フローに合わせて更新した。
+
+---
+
+#### 検証
+* `ansible-playbook --syntax-check -i inventory.yml site.yml`
+* `ansible-playbook --list-tasks -i inventory.yml site.yml`
+* `git diff --check`

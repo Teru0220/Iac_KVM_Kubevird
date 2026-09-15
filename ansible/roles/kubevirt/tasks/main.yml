@@ -1,0 +1,352 @@
+- name: Install KubeVirt host prerequisite packages
+  ansible.builtin.apt:
+    name:
+      - apparmor-utils
+      - libvirt-clients
+    state: present
+    update_cache: true
+
+- name: Add the Ansible user to the kvm group
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: kvm
+    append: true
+  when: ansible_user_id != 'root'
+
+- name: Check for the KVM device
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: kubevirt_kvm_device
+  changed_when: false
+
+- name: Set KVM device permissions
+  ansible.builtin.file:
+    path: /dev/kvm
+    mode: '0660'
+  when: kubevirt_kvm_device.stat.exists
+
+- name: Validate host virtualization support
+  ansible.builtin.command: virt-host-validate qemu
+  register: kubevirt_virt_host_validation
+  changed_when: false
+  failed_when: >-
+    kubevirt_virt_host_validation.rc != 0 or
+    'FAIL' in kubevirt_virt_host_validation.stdout or
+    'FAIL' in kubevirt_virt_host_validation.stderr
+
+- name: Tear down AppArmor profiles
+  ansible.builtin.command: aa-teardown
+  changed_when: true
+
+- name: Stop and disable AppArmor
+  ansible.builtin.systemd:
+    name: apparmor
+    state: stopped
+    enabled: false
+
+- name: Get the latest KubeVirt release
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/kubevirt/kubevirt/releases/latest
+    return_content: true
+  register: kubevirt_kubevirt_release
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Install the KubeVirt operator
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - apply
+      - --filename
+      - "https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_kubevirt_release.json.tag_name }}/kubevirt-operator.yaml"
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  register: kubevirt_kubevirt_operator_apply
+  changed_when: "'created' in kubevirt_kubevirt_operator_apply.stdout or 'configured' in kubevirt_kubevirt_operator_apply.stdout"
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Wait until the virt-operator deployment exists
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - deployment
+      - virt-operator
+      - --namespace
+      - kubevirt
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  register: kubevirt_operator_check
+  until: kubevirt_operator_check.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Wait for the KubeVirt operator
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace
+      - kubevirt
+      - --for=condition=Available
+      - --timeout=300s
+      - deployment/virt-operator
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  changed_when: false
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Install the KubeVirt custom resource
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - apply
+      - --filename
+      - "https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_kubevirt_release.json.tag_name }}/kubevirt-cr.yaml"
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  register: kubevirt_kubevirt_cr_apply
+  changed_when: "'created' in kubevirt_kubevirt_cr_apply.stdout or 'configured' in kubevirt_kubevirt_cr_apply.stdout"
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Wait for KubeVirt to become available
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace
+      - kubevirt
+      - kubevirt/kubevirt
+      - --for=condition=Available
+      - --timeout={{ kubevirt_wait_timeout }}
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  changed_when: false
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Install NFS server on the first control plane
+  ansible.builtin.apt:
+    name: nfs-kernel-server
+    state: present
+    update_cache: true
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Install NFS client on worker nodes
+  ansible.builtin.apt:
+    name: nfs-common
+    state: present
+    update_cache: true
+  when: "'worker_node' in group_names"
+
+- name: Create the NFS data directory
+  ansible.builtin.file:
+    path: "{{ nfs_export_path }}"
+    state: directory
+    owner: nobody
+    group: nogroup
+    mode: '0777'
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Configure the NFS export
+  ansible.builtin.lineinfile:
+    path: /etc/exports
+    regexp: "^{{ nfs_export_path | regex_escape }}\\s"
+    line: "{{ nfs_export_path }} {{ nfs_export_options }}"
+    create: true
+    mode: '0644'
+  register: kubevirt_nfs_export
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Apply NFS exports
+  ansible.builtin.command: exportfs -a
+  when:
+    - inventory_hostname == groups['control_plane'][0]
+    - kubevirt_nfs_export.changed
+  changed_when: true
+
+- name: Restart and enable the NFS server
+  ansible.builtin.systemd:
+    name: nfs-kernel-server
+    state: restarted
+    enabled: true
+  when:
+    - inventory_hostname == groups['control_plane'][0]
+    - kubevirt_nfs_export.changed
+
+- name: Patch KubeVirt to enable disk expansion
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - patch
+      - kubevirt
+      - kubevirt
+      - --namespace
+      - kubevirt
+      - --type=merge
+      - --patch
+      - '{"spec":{"configuration":{"developerConfiguration":{"featureGates":["ExpandDisks"]}}}}'
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  register: kubevirt_kubevirt_patch
+  changed_when: "'configured' in kubevirt_kubevirt_patch.stdout or 'patched' in kubevirt_kubevirt_patch.stdout"
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Get the latest CDI release
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/kubevirt/containerized-data-importer/releases/latest
+    return_content: true
+  register: kubevirt_cdi_release
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Install CDI operator and custom resource
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - apply
+      - --filename
+      - "https://github.com/kubevirt/containerized-data-importer/releases/download/{{ kubevirt_cdi_release.json.tag_name }}/{{ item }}"
+  loop:
+    - cdi-operator.yaml
+    - cdi-cr.yaml
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  register: kubevirt_cdi_apply
+  changed_when: "'created' in kubevirt_cdi_apply.stdout or 'configured' in kubevirt_cdi_apply.stdout"
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Wait for CDI operator and API to be ready
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace
+      - cdi
+      - --for=condition=Available
+      - --timeout=300s
+      - deployment/cdi-operator
+      - deployment/cdi-deployment
+      - deployment/cdi-apiserver
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  changed_when: false
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Download Helm installer
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /tmp/get-helm-3
+    mode: '0755'
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Install Helm
+  ansible.builtin.command: /tmp/get-helm-3
+  args:
+    creates: /usr/local/bin/helm
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Add the NFS provisioner Helm repository
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - helm
+      - repo
+      - add
+      - nfs-subdir-external-provisioner
+      - https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
+      - --force-update
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  changed_when: false
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Update Helm repositories
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command: helm repo update
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  changed_when: false
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Deploy the NFS provisioner and default StorageClass
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - helm
+      - upgrade
+      - --install
+      - nfs-client
+      - nfs-subdir-external-provisioner/nfs-subdir-external-provisioner
+      - --set
+      - "nfs.server={{ hostvars[groups['control_plane'][0]].ansible_host }}"
+      - --set
+      - "nfs.path={{ nfs_export_path }}"
+      - --set
+      - "storageClass.name={{ nfs_storage_class_name }}"
+      - --set
+      - storageClass.defaultClass=true
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  when: inventory_hostname == groups['control_plane'][0]
+  changed_when: true
+
+- name: Copy the Ubuntu DataVolume manifest
+  become: true
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../K8s_yml/ubuntu/tmp_dv.yml"
+    dest: /tmp/tmp_dv.yml
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0644'
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Apply the Ubuntu DataVolume manifest
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - apply
+      - --filename
+      - /tmp/tmp_dv.yml
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  register: kubevirt_ubuntu_datavolume_apply
+  changed_when: "'created' in kubevirt_ubuntu_datavolume_apply.stdout or 'configured' in kubevirt_ubuntu_datavolume_apply.stdout"
+  when: inventory_hostname == groups['control_plane'][0]
+
+- name: Wait for the Ubuntu DataVolume to complete
+  become: true
+  become_user: "{{ ansible_user }}"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --namespace
+      - default
+      - --for=jsonpath={.status.phase}=Succeeded
+      - --timeout={{ datavolume_wait_timeout }}
+      - datavolume/ubuntu-image
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  changed_when: false
+  when: inventory_hostname == groups['control_plane'][0]

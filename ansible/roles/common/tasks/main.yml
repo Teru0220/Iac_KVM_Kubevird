@@ -24,7 +24,7 @@
   changed_when: false
 
 - name: Configure Kubernetes sysctl settings
-  ansible.builtin.sysctl:
+  ansible.posix.sysctl:
     name: "{{ item.key }}"
     value: "{{ item.value }}"
     state: present

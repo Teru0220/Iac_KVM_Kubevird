@@ -1,0 +1,59 @@
+cat << EOF > ubuntu-vm.yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: ubuntu-vm
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+    - metadata:
+        name: ubuntu-dv
+      spec:
+        storage:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+          storageClassName: nfs-client
+        source:
+          pvc:
+            name: ubuntu-image
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: ubuntu-vm
+    spec:
+      domain:
+        devices:
+          disks:
+          - disk:
+              bus: virtio
+            name: datavolumedisk
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+        resources:
+          requests:
+            memory: 2Gi
+      volumes:
+      - dataVolume:
+          name: ubuntu-dv
+        name: datavolumedisk
+      - cloudInitNoCloud:
+          userData: |
+            #cloud-config
+            users:
+              - name: ubuntu
+                sudo: ['ALL=(ALL) NOPASSWD:ALL']
+                shell: /bin/bash
+                ssh_authorized_keys:
+                  - $(cat ~/.ssh/id_rsa.pub 2>/dev/null || cat ~/.ssh/id_ed25519.pub)
+            chpasswd:
+              list: |
+                ubuntu:ubuntu
+              expire: False
+            ssh_pwauth: True
+        name: cloudinitdisk
+EOF
+kubectl apply -f ubuntu-vm.yaml

@@ -6,25 +6,35 @@
 
 ```text
 .
-├── composition/                     # Terraform のルート構成
-│   ├── main.tf                      # libvirt domain / volume を node 単位で生成
-│   ├── variables.tf                 # nodes などの定義
-│   ├── terraform.tfvars            # 実際のノード構成
-│   └── tests/                      # terraform test
-├── infrastructure_module/           # 1 node 分の論理モジュール
-├── resource_module/                 # libvirt volume / domain / cloud-init などのリソース実装
+├── Terraform/                       # Terraform の本体
+│   ├── composition/                # Terraform のルート構成
+│   │   ├── main.tf                  # libvirt domain / volume を node 単位で生成
+│   │   ├── variables.tf             # nodes などの定義
+│   │   ├── terraform.tfvars        # 実際のノード構成
+│   │   └── tests/                  # terraform test
+│   ├── infrastructure_module/      # 1 node 分の論理モジュール
+│   ├── resource_module/            # libvirt volume / domain / cloud-init などのリソース実装
+│   └── terraform.tfvars.example    # サンプル設定
 ├── ansible/
-│   ├── inventory.yml                # Terraform により生成される実行用 inventory
-│   ├── inventory.yml.tftpl          # inventory 生成テンプレート
+│   ├── inventory.yml               # Terraform により生成される実行用 inventory
+│   ├── inventory.yml.tftpl         # inventory 生成テンプレート
 │   ├── site.yml                    # 全ロールを呼び出す playbook
-│   ├── group_vars/
+│   ├── group_vars/all.yml          # Kubernetes/KubeVirt/NFS の共通変数
 │   └── roles/
+│       ├── common/                 # OS 前提設定
+│       ├── container_runtime/      # containerd 設定
+│       ├── k8s_packages/           # kubeadm/kubelet/kubectl 導入
+│       ├── control_plane/          # kubeadm init、CNI、SSH 鍵生成
+│       ├── worker/                 # worker のクラスタ参加
+│       └── kubevirt/               # KubeVirt、CDI、NFS、DataVolume
+├── K8s_yml/                        # Kubernetes/KubeVirt マニフェスト
+├── doc/                            # 手動手順と自動化対象の仕様
+├── historys/                       # 作業履歴
 ├── README.md
-├── HISTORY.md
-└── terraform.tfvars.example
+└── .gitignore
 ```
 
-Terraform は `composition` で Node 定義を展開して各 VM を作成し、cloud-init により `ubuntu` ユーザーと SSH 公開鍵を設定します。その後、`ansible/inventory.yml` が自動生成され、Ansible からノードへ接続して Kubernetes の準備を進めます。
+Terraform は `Terraform/composition` で Node 定義を展開して各 VM を作成し、cloud-init により `ubuntu` ユーザーと SSH 公開鍵を設定します。その後、`ansible/inventory.yml` が自動生成され、Ansible からノードへ接続して Kubernetes の準備を進めます。
 
 ## 2. 主要な機能
 
@@ -35,6 +45,10 @@ Terraform は `composition` で Node 定義を展開して各 VM を作成し、
   - `control` -> `control_plane`
   - `worker` -> `worker_node`
 - Ansible による Kubernetes 前提設定とクラスタ構築
+- control plane 上での ED25519 SSH 鍵ペア生成
+- KubeVirt Operator/CR と CDI の導入
+- NFS サーバー、NFS provisioner、デフォルト StorageClass の構築
+- Ubuntu cloud image 用 DataVolume の apply と `Succeeded` 待機
 
 ## 3. 前提条件
 
@@ -45,6 +59,9 @@ Terraform は `composition` で Node 定義を展開して各 VM を作成し、
 - `dmacvicar/libvirt` provider
 - Ubuntu 22.04 cloud image
 - SSH 公開鍵ファイル
+- Ansible と `ansible.posix` collection
+- `kubectl`、`kubeadm`、`kubelet`、`helm`（Ansible が対象ノードへ導入）
+- KVM が利用可能なホスト（`/dev/kvm`）
 
 ## 4. 事前準備
 
@@ -56,7 +73,7 @@ wget -O ~/tmp_disk/ubuntu-22.04-cloudimg.qcow2 \
   https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
 ```
 
-`composition/terraform.tfvars` の `image_path` にダウンロードしたファイルの絶対パスを設定します。
+`Terraform/composition/terraform.tfvars` の `image_path` にダウンロードしたファイルの絶対パスを設定します。
 
 ```hcl
 ssh_public_key_path = "~/.ssh/id_ed25519.pub"
@@ -102,7 +119,7 @@ nodes = [
 ## 5. Terraform による VM 作成
 
 ```bash
-cd composition
+cd Terraform/composition
 terraform init
 terraform fmt -recursive
 terraform validate
@@ -116,7 +133,7 @@ terraform apply
 terraform output domain_names
 terraform output volume_names
 terraform output cloudinit_names
-cat ../ansible/inventory.yml
+cat ../../ansible/inventory.yml
 ```
 
 ## 6. Ansible による接続確認と構築
@@ -141,10 +158,104 @@ ansible-playbook -i inventory.yml site.yml
 - `k8s_packages`
 - `control_plane`
 - `worker`
+- `kubevirt`
+
+`kubevirt` ロールは次の処理を control plane を中心に実行します。
+
+1. 全ノードの KVM 前提条件確認と AppArmor 停止
+2. KubeVirt Operator/CR の導入と `Available` 待機
+3. NFS サーバーと worker の NFS クライアント設定
+4. KubeVirt の `ExpandDisks` 有効化
+5. CDI、Helm、NFS external provisioner の導入
+6. `K8s_yml/ubuntu/tmp_dv.yml` の DataVolume apply と `Succeeded` 待機
+
+共通設定は [ansible/group_vars/all.yml](ansible/group_vars/all.yml) で管理します。
+
+- `nfs_export_path`: NFS export のパス
+- `nfs_export_options`: NFS export の公開オプション
+- `nfs_storage_class_name`: StorageClass 名（既定値は `nfs-client`）
+- `kubevirt_wait_timeout`: KubeVirt の起動待機時間
+- `datavolume_wait_timeout`: DataVolume の完了待機時間
+
+control plane の `ansible_user` には `/home/<ユーザー>/.ssh/id_ed25519` と対応する公開鍵を作成します。既存の秘密鍵は上書きしません。
+
+### KubeVirt VM の起動サンプル
+
+DataVolume `ubuntu-image` が `Succeeded` になった後、[K8s_yml/ubuntu/test_cmd_vm.txt](K8s_yml/ubuntu/test_cmd_vm.txt) のコマンドで Ubuntu VM を作成できます。コマンドは `ubuntu-vm.yaml` を生成して apply します。
+
+```bash
+cd K8s_yml/ubuntu
+cat << EOF > ubuntu-vm.yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: ubuntu-vm
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+    - metadata:
+        name: ubuntu-dv
+      spec:
+        storage:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+          storageClassName: nfs-client
+        source:
+          pvc:
+            name: ubuntu-image
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: ubuntu-vm
+    spec:
+      domain:
+        devices:
+          disks:
+          - disk:
+              bus: virtio
+            name: datavolumedisk
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+        resources:
+          requests:
+            memory: 2Gi
+      volumes:
+      - dataVolume:
+          name: ubuntu-dv
+        name: datavolumedisk
+      - cloudInitNoCloud:
+          userData: |
+            #cloud-config
+            users:
+              - name: ubuntu
+                sudo: ['ALL=(ALL) NOPASSWD:ALL]
+                shell: /bin/bash
+                ssh_authorized_keys:
+                  - $(cat ~/.ssh/id_rsa.pub 2>/dev/null || cat ~/.ssh/id_ed25519.pub)
+            chpasswd:
+              list: |
+                ubuntu:ubuntu
+              expire: False
+            ssh_pwauth: True
+        name: cloudinitdisk
+EOF
+kubectl apply -f ubuntu-vm.yaml
+```
+
+作成後は次のコマンドで VM と VMI の状態を確認します。
+
+```bash
+kubectl get vm ubuntu-vm
+kubectl get vmi ubuntu-vm
+```
 
 ## 7. 役割と作成ルール
 
-`composition/terraform.tfvars` に設定する `role` は次のように使われます。
+`Terraform/composition/terraform.tfvars` に設定する `role` は次のように使われます。
 
 - `control` : control-plane ノードとして `control_plane` グループに登録
 - `worker` : worker ノードとして `worker_node` グループに登録
@@ -154,13 +265,13 @@ ansible-playbook -i inventory.yml site.yml
 ## 8. 後片付け
 
 ```bash
-cd composition
+cd Terraform/composition
 terraform destroy
 ```
 
 ## 9. 変更履歴
 
-最新の対応内容は [HISTORY.md](HISTORY.md) を参照してください。
+最新の対応内容は [historys/HISTORY.md](historys/HISTORY.md) を参照してください。KubeVirt 関連の詳細は [historys/KubevirtHISTORY.md](historys/KubevirtHISTORY.md) を参照してください。
 
 ---
 
@@ -171,10 +282,10 @@ terraform destroy
 native Terraform test を使用しています。テストは `plan` モードで実行されるため、libvirt リソースを実際には作成しません。
 
 ```bash
-terraform -chdir=composition test
+terraform -chdir=Terraform/composition test
 ```
 
-テストファイルは [composition/tests/nodes.tftest.hcl](composition/tests/nodes.tftest.hcl) です。複数の node から domain と volume が生成され、それぞれの名前が設定値どおりになることを検証します。
+テストファイルは [Terraform/composition/tests/nodes.tftest.hcl](Terraform/composition/tests/nodes.tftest.hcl) です。複数の node から domain と volume が生成され、それぞれの名前が設定値どおりになることを検証します。
 
 ## コンソール接続
 
@@ -201,8 +312,14 @@ sudo systemctl enable --now serial-getty@ttyS0.service
 
 ## 参考ファイル
 
-- [terraform.tfvars.example](terraform.tfvars.example)
-- [composition/main.tf](composition/main.tf)
-- [infrastructure_module/main.tf](infrastructure_module/main.tf)
-- [resource_module/libvirt_volume/main.tf](resource_module/libvirt_volume/main.tf)
-- [resource_module/libvirt_domain/main.tf](resource_module/libvirt_domain/main.tf)
+- [Terraform/terraform.tfvars.example](Terraform/terraform.tfvars.example)
+- [Terraform/composition/main.tf](Terraform/composition/main.tf)
+- [Terraform/infrastructure_module/main.tf](Terraform/infrastructure_module/main.tf)
+- [Terraform/resource_module/libvirt_volume/main.tf](Terraform/resource_module/libvirt_volume/main.tf)
+- [Terraform/resource_module/libvirt_domain/main.tf](Terraform/resource_module/libvirt_domain/main.tf)
+
+## 参考サイト
+
+- [KubeVirt 公式: Kubernetes へのインストール](https://kubevirt.io/user-guide/cluster_admin/installation/#installing-kubevirt-on-kubernetes)
+- [Server World: Ubuntu 22.04 の AppArmor 設定](https://www.server-world.info/query?os=Ubuntu_22.04&p=apparmor&f=1)
+- [おのえ.dev: KubeVirt の構築・運用例](https://www.onoe.dev/blog/kubevirt/)

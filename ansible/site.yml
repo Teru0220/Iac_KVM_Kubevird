@@ -17,3 +17,9 @@
   become: true
   roles:
     - worker
+
+- name: Configure KubeVirt and storage
+  hosts: k8s_cluster
+  become: true
+  roles:
+    - kubevirt

@@ -1,6 +1,8 @@
-# KVM ノードプロビジョニング + Kubernetes 構築基盤
+# KVM/libvirt 上の Kubernetes・KubeVirt 基盤構築
 
-このリポジトリは、Terraform と `dmacvicar/libvirt` provider を使って KVM/libvirt 上に仮想ノードを作成し、さらに Ansible で Kubernetes クラスタの初期化・ノード参加までを自動化する構成です。
+> **ステータス: 構築・検証中**
+
+このリポジトリは、Terraform と `dmacvicar/libvirt` provider で KVM/libvirt 上に仮想ノードを作成し、Ansible で Kubernetes クラスタ、KubeVirt、CDI、NFS ストレージ基盤を構築するための IaC 構成です。KubeVirt 上で Ubuntu の仮想マシンを起動するところまでを対象とします。
 
 ## 1. 構成の概要
 

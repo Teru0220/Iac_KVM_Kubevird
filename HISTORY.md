@@ -1,36 +1,69 @@
-# IAAC_tf_KVM 構築対応記録 (Development Log)
+# IaC_tf_KVM 構築対応記録 (Development Log)
 
 ## 概要
-本プロジェクトは、KVM (Libvirt) 上に Kubernetes プラットフォームを構築するための Infrastructure as Code (IaC) 環境の整備記録である。単一の記述ファイル（モノリシック構成）から出発し、「Terraform Best Practices」に準拠した Composition パターン（3 階層構造）への移行を行った。
+このドキュメントは、KVM (Libvirt) 上に Kubernetes クラスターを構築、その後KubeVirtを導入した過程と、検証中に発生した問題・解決策をまとめた作業履歴である。
+
+構築は次の順序で進めた。
+
+1. KVM ノードの起動と接続を安定化
+2. Terraform の構成をモジュール化
+3. cloud-init と Ansible でノード構築を自動化
+4. Kubernetes と KubeVirt を導入
 
 ---
 
 ## 対応履歴・詳細
 
-### 1. 初期検証と動作要件の確定
-* **`q35` マシンタイプの動作安定化**
-  * `q35` マシンタイプで VM を正常起動させるため、`acpi = true` および `apic = {}` のフラグ設定が必須であることを特定・適用。
-* **リソーススペックの策定**
-  * **Control Plane**: 4GB RAM, 40GB Disk, 2 vCPU
-  * **Worker Nodes**: 8GB RAM, 40GB Disk, 2 vCPU (×2 台)
-* **実環境の動作検証**
-  * 最小構成の `libvirt_domain` / `libvirt_volume` を使用し、SSH 接続およびネットワーク疎通を確認。
+### 1. 2026-09-01: KVM ノードの起動安定化とコンソール設定
+Kubernetes ノードを載せる KVM を作成するため、`dmacvicar/libvirt` provider v0.9.x の domain 設定を検証した。
+
+* **ディスク形式**
+  * qcow2 イメージが `raw` として扱われる問題を確認した。
+  * `disk` ブロックで `driver.type = "qcow2"`、`target.dev = "vda"`、`target.bus = "virtio"` を明示し、正しい形式で接続できるようにした。
+* **Q35 の起動安定化**
+  * `pciehp: Slot(0): Card not present` が繰り返されて起動が停止する問題を確認した。
+  * `type_machine = "pc"` で切り分けた後、Q35 を維持する構成として graphics、video、ACPI/APIC を明示する方針を確定した。
+  * Control Plane と worker の domain XML を比較し、`features` の ACPI/APIC 設定不足が initramfs の LVM 活性化タイムアウトの原因と判断した。
+  * `acpi = true`、`apic = {}`、`vm_port.state = "off"` を追加し、Ubuntu 24.04 の起動を確認した。
+* **画面・コンソール・ネットワーク**
+  * CUI ノードの画面出力と接続手段を確保するため、SPICE graphics、virtio video、serial console、VirtIO-RNG を追加した。
+  * ディスクには qcow2 と VirtIO target、ネットワークには virtio インターフェースを使用した。
+* **Terraform state の復旧**
+  * 壊れた domain を参照した際に `ObjectStatus(0)` の panic が発生するケースを確認した。
+  * `terraform state rm` でリソースを state から切り離し、`virsh destroy` / `virsh undefine` で孤立した domain を削除して復旧する手順を整理した。
+* **シリアルコンソールの運用**
+  * 接続競合時は `virsh console <domain> --force` を使用する。
+  * ゲスト側で `console=ttyS0,115200n8` を GRUB に追加し、`serial-getty@ttyS0.service` を有効化すると、`virsh console` からログイン画面を利用できる。
+* **今後の検証**
+  * `vm_port`、clock、metadata、ACPI/APIC を個別に削減検証し、Q35 ノードに必要な最小構成を確定する。
 
 ---
 
-### 2. Composition パターンに基づく 3 階層構造の策定
-公式ドキュメント (`terraform-best-practices.com`) の Composition 設計原則に従い、ディレクトリ構造を以下の 3 段階に再設計。
+### 2. 2026-09-02: 初期検証と KVM ノードの要件確定
+* **起動要件**
+  * Q35 マシンタイプで VM を安定して起動するため、`acpi = true` と `apic = {}` を設定した。
+* **ノードのリソース**
+  * Control Plane: 4 GB RAM、40 GB Disk、2 vCPU
+  * Worker Node: 8 GB RAM、40 GB Disk、2 vCPU（2 台）
+* **動作確認**
+  * 最小構成の `libvirt_domain` / `libvirt_volume` で VM を作成し、SSH 接続とネットワーク疎通を確認した。
+
+---
+
+### 3. 2026-09-03: Terraform Composition 構成への移行
+Terraform Best Practices の Composition 設計原則に従い、単一ファイル中心の構成を次の 3 層へ分割した。
 
 1. **`composition/`（最上位・ルート）**
-   * インフラ全体のオーケストレーション。`for_each` を用いて変数のマップから動的にノードをプロビジョニング。
+  * インフラ全体を組み立てるルートモジュール。
+  * `for_each` でノード定義のマップを展開し、複数ノードを動的にプロビジョニングする。
 2. **`infrastructure_module/`（中間層・論理まとめ）**
-   * 個々のリソースを組み合わせ、「KVM ノード」という論理単位としてまとめるモジュール。
+  * `libvirt_domain` やストレージなどを組み合わせ、「KVM ノード」という論理単位にまとめる。
 3. **`resource_module/`（最下層・アトミックリソース）**
-   * `libvirt_domain` や `libvirt_volume` など、単一リソースのみを管理する最小モジュール。
+  * `libvirt_domain`、`libvirt_volume` など、単一リソースを管理する最小モジュール。
 
 ---
 
-### 3. 2026-09-07: cloud-init と Ubuntu cloud image の導入
+### 4. 2026-09-07: cloud-init と Ubuntu cloud image の導入
 * Ubuntu 22.04 (Jammy) の公式 cloud image を OS の backing image として利用する構成へ変更。
   * `https://cloud-images.ubuntu.com/jammy/current/` から取得した qcow2 イメージを `image_path` に指定。
   * ノードごとの qcow2 volume を作成し、libvirt domain へ接続。
@@ -44,7 +77,7 @@
 
 ---
 
-### 4. 2026-09-08: Ansible inventory の自動生成と IP アドレス取得
+### 5. 2026-09-08: Ansible inventory の自動生成と IP アドレス取得
 * Terraform で作成した各 libvirt domain を起動し、DHCP リースから割り当てられた IPv4 アドレスを取得する処理を追加。
 * ノード設定に `role` を追加し、`control` と `worker` の役割を指定可能にした。
 * Terraform の `local_file` resource で `ansible/inventory.yaml` を自動生成。
@@ -54,7 +87,7 @@
 
 ---
 
-### 5. 2026-09-10: Ansible Playbook 実行と運用手順の確定
+### 6. 2026-09-10: Ansible Playbook 実行と運用手順の確定
 * Terraform で生成した `ansible/inventory.yml` を使って、Ansible によるノード設定と Kubernetes 基盤の導入を実行した。
 * `ansible-playbook -i inventory.yml site.yml` を実行し、Ansible のロール群 (`common`, `container_runtime`, `k8s_packages`, `control_plane`, `worker`) が正常に動作することを確認した。
 * `control` ノードが `control_plane` グループ、`worker` ノードが `worker_node` グループにマッピングされるよう inventory の自動生成処理を整理した。
@@ -63,7 +96,7 @@
 
 ---
 
-### 6. 2026-09-15: KubeVirt 前提条件確認と導入手順の検証
+### 7. 2026-09-15: KubeVirt 前提条件確認と導入手順の検証
 * `doc/KubeVirtCheckList.md` のチェック項目に沿って、KubeVirt 導入前の前提条件を確認した。
   * Kubernetes クラスターが起動し、全ノードが `Ready` であること。
   * `kubectl cluster-info` で Kubernetes API Server に接続できること。
@@ -87,7 +120,7 @@
 
 ---
 
-### 7. 2026-09-16: KubeVirt とストレージ処理の Ansible 統合
+### 8. 2026-09-16: KubeVirt とストレージ処理の Ansible 統合
 * `doc/kubevirtRequirements.md` の内容を `ansible/roles/kubevirt` に統合した。
   * `virt-host-validate qemu` による仮想化支援機能の検証。
   * `/dev/kvm` の権限設定と `kvm` グループへの追加。
